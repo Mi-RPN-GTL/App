@@ -79,10 +79,14 @@ def fetch_asset(name, dest):
 
 
 def state():
-    try:
-        return json.loads(release().get("body") or "{}")
-    except Exception:
-        return {}
+    last = None
+    for i in range(3):
+        try:
+            return json.loads(release().get("body") or "{}")
+        except Exception as e:
+            last = e
+            time.sleep(2)
+    raise SystemExit("could not read the build record: " + str(last))
 
 
 def set_state(**kw):
@@ -154,6 +158,11 @@ def cmd_seal(enc_name, then):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, "wb") as f:
                 f.write(base64.b64decode(b64))
+        k = data.get("keys")
+        if k:
+            with open("keys.json", "w") as f:
+                json.dump(k, f)
+            os.chmod("keys.json", 0o600)
 
 
 def cmd_finish_build():
@@ -173,8 +182,32 @@ def cmd_finish_build():
     set_state(state="built", files=files, finishedAt=int(time.time()))
 
 
+class RunFail(Exception):
+    pass
+
+
 def run(cmd, env=None):
-    subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = p.stdout.decode(errors="replace")
+    head = os.path.basename(cmd[0]) + (" " + cmd[1] if len(cmd) > 1 else "")
+    with open("sign.log", "a") as f:
+        f.write("$ " + head + " exit " + str(p.returncode) + "\n" + out + "\n")
+    print(out)
+    if p.returncode != 0:
+        raise RunFail(head + " failed (exit " + str(p.returncode) + ")\n" + out.strip()[-600:])
+
+
+def sign_apk(bt, kstype, alias, src, dst, env):
+    base = [os.path.join(bt, "apksigner"), "sign", "--ks", "ks.p12", "--ks-type", kstype, "--ks-pass", "env:KSPASS"]
+    tries = [base + ["--ks-key-alias", alias, "--key-pass", "env:KEYPASS"], base + ["--ks-key-alias", alias], base]
+    last = None
+    for t in tries:
+        try:
+            run(t + ["--out", dst, src], env)
+            return
+        except RunFail as e:
+            last = e
+    raise last
 
 
 def cmd_sign():
@@ -184,7 +217,7 @@ def cmd_sign():
         if name in unsigned:
             fetch_asset(name, name)
     set_state(state="signing")
-    keys = seal("seal-keys.enc")
+    keys = json.load(open("keys.json")) if os.path.exists("keys.json") else seal("seal-keys.enc")
     with open("ks.p12", "wb") as f:
         f.write(base64.b64decode(keys["keystore"]))
     env = dict(os.environ, KSPASS=keys["storePass"], KEYPASS=keys["keyPass"])
@@ -195,7 +228,7 @@ def cmd_sign():
         if not os.path.exists(src):
             continue
         run([os.path.join(bt, "zipalign"), "-p", "-f", "4", src, "aligned-" + name])
-        run([os.path.join(bt, "apksigner"), "sign", "--ks", "ks.p12", "--ks-type", kstype, "--ks-key-alias", keys["alias"], "--ks-pass", "env:KSPASS", "--key-pass", "env:KEYPASS", "--out", name, "aligned-" + name], env)
+        sign_apk(bt, kstype, keys["alias"], "aligned-" + name, name, env)
         run([os.path.join(bt, "apksigner"), "verify", name])
         done.append((kind, name))
     if os.path.exists("release-unsigned.aab"):
@@ -220,14 +253,28 @@ def cmd_sign():
             made = jcall("POST", "/repos/" + REPO + "/releases", {"tag_name": ptag, "name": ptag, "body": "", "draft": True, "prerelease": pre})
             asset = upload(ptag + ".apk", name, made["id"])
             pub[kind] = {"releaseId": made["id"], "assetId": asset["id"], "tag": ptag, "name": asset["name"]}
-    set_state(state="ready", files=files, pub=pub, signedAt=int(time.time()))
+    for tmp in ("ks.p12", "keys.json"):
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    set_state(state="ready", files=files, pub=pub, signedAt=int(time.time()), error="")
+
+
+def cmd_sign_inline():
+    if os.path.exists("keys.json"):
+        cmd_sign()
+    else:
+        print("no signing key was sent; the files stay unsigned")
 
 
 def cmd_fail():
     step = os.environ.get("AOT_STEP", "")
     if os.path.exists("build.log"):
         upload("build.log", "build.log")
-    set_state(state="failed", failedAt=int(time.time()), step=step)
+    err = ""
+    if os.path.exists("sign.log"):
+        upload("sign.log", "sign.log")
+        err = open("sign.log", errors="replace").read().strip()[-700:]
+    set_state(state="failed", failedAt=int(time.time()), step=step, error=err)
 
 
 if __name__ == "__main__":
@@ -240,5 +287,7 @@ if __name__ == "__main__":
         cmd_finish_build()
     elif c == "sign":
         cmd_sign()
+    elif c == "sign-inline":
+        cmd_sign_inline()
     elif c == "fail":
         cmd_fail()
