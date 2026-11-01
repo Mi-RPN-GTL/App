@@ -70,6 +70,8 @@ jobs:
         run: gradle assembleDebug assembleRelease bundleRelease --console=plain >> "$GITHUB_WORKSPACE/build.log" 2>&1
       - name: Upload
         run: python3 .github/aot/aot_cloud.py finish-build
+      - name: Sign
+        run: python3 .github/aot/aot_cloud.py sign-inline
       - name: Report failure
         if: ${{ failure() }}
         run: python3 .github/aot/aot_cloud.py fail
