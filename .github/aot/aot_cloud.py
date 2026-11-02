@@ -3,6 +3,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,9 @@ REL = os.environ["REL"]
 API = "https://api.github.com"
 BT = os.environ.get("BT", "36.0.0")
 SDK = os.environ.get("ANDROID_HOME", "")
+WS = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+FACTS = os.path.join(WS, "build-facts.txt")
+LOG = os.path.join(WS, "build.log")
 
 
 def call(method, url, data=None, ctype="application/json"):
@@ -179,6 +183,8 @@ def cmd_finish_build():
         if not found:
             continue
         files.append(info(kind, name, found[0], upload(name, found[0])))
+    if os.path.exists(FACTS):
+        upload("build-facts.txt", FACTS)
     set_state(state="built", files=files, finishedAt=int(time.time()))
 
 
@@ -266,8 +272,115 @@ def cmd_sign_inline():
         print("no signing key was sent; the files stay unsigned")
 
 
+def fact(text):
+    with open(FACTS, "a") as f:
+        f.write(text + "\n")
+
+
+def capture(cmd, cwd=None, limit=240):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=limit)
+        return p.stdout.decode(errors="replace")
+    except Exception as e:
+        return "(" + " ".join(cmd[:2]) + " did not run: " + str(e) + ")"
+
+
+def cmd_env_facts():
+    g = capture(["gradle", "--version", "--console=plain"])
+    for key in ("Gradle ", "Kotlin:", "Launcher JVM:", "Daemon JVM:"):
+        for line in g.splitlines():
+            if line.startswith(key):
+                fact("runtime: " + line.strip())
+                break
+    fact("runtime: runner " + os.environ.get("RUNNER_OS", "?") + " " + os.environ.get("ImageVersion", ""))
+
+
+HEAL = re.compile(r"unresolved reference:? '?serializer|not enough information to infer type variable|cannot infer a type|is ambiguous|could not (?:resolve|download|get)|daemon (?:disappeared|has terminated|crashed)|connection to the daemon|outofmemory|metaspace|incompatible version|incompatible binary|could not load module|unable to load class|already registered|corrupt", re.I)
+SERIAL = re.compile(r"unresolved reference:? '?serializer", re.I)
+TASKS = ["compileDebugKotlin", "compileDebugJavaWithJavac", "compileReleaseKotlin", "compileReleaseJavaWithJavac"]
+
+
+def gradle_run(args, tag):
+    with open(LOG, "a") as f:
+        f.write("[aot] " + tag + "\n")
+        f.flush()
+        p = subprocess.run(["gradle"] + args + ["--console=plain"], stdout=f, stderr=subprocess.STDOUT)
+    return p.returncode
+
+
+def log_from(offset):
+    with open(LOG, "rb") as f:
+        f.seek(offset)
+        return f.read().decode(errors="replace")
+
+
+def serial_plugin_on():
+    try:
+        return "plugin.serialization" in open("build.gradle.kts").read()
+    except Exception:
+        return False
+
+
+def cmd_compile():
+    start = os.path.getsize(LOG) if os.path.exists(LOG) else 0
+    rc = gradle_run(TASKS, "compile attempt 1")
+    fact("compile attempt 1: exit " + str(rc))
+    if rc == 0:
+        return 0
+    seg = log_from(start)
+    if not HEAL.search(seg):
+        fact("compile: the failure looks like a source error, so no retry")
+        return rc
+    plan = []
+    if SERIAL.search(seg) and not serial_plugin_on():
+        plan.append("force-serialization")
+    plan.append("clean-rerun")
+    n = 1
+    for step in plan:
+        n += 1
+        if step == "force-serialization":
+            env = dict(os.environ, AOT_FORCE_SERIAL="1")
+            subprocess.run([sys.executable, os.path.join(WS, ".github", "aot", "aot_gradle_gen.py"), ".", FACTS], env=env, check=False)
+            args = list(TASKS)
+        else:
+            subprocess.run(["gradle", "--stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for d in (".gradle", "build"):
+                shutil.rmtree(d, ignore_errors=True)
+            args = ["--rerun-tasks", "--no-build-cache", "--no-daemon", "-Pkotlin.compiler.execution.strategy=in-process", "-Pkotlin.incremental=false"] + TASKS
+        rc = gradle_run(args, "compile attempt " + str(n) + " (" + step + ")")
+        fact("compile attempt " + str(n) + " (" + step + "): exit " + str(rc))
+        if rc == 0:
+            fact("compile healed by: " + step)
+            return 0
+    return rc
+
+
+KEEP = re.compile(r"kotlin-gradle-plugin|kotlin-stdlib|serialization|compose-compiler|compose.*plugin|com\.android\.tools\.build:gradle|kotlin-compiler", re.I)
+
+
+def diag():
+    seen = []
+    for label, args in (("classpath", ["buildEnvironment"]), ("deps", ["dependencies", "--configuration", "debugCompileClasspath"])):
+        out = capture(["gradle", "-q", "--console=plain"] + args, cwd="proj" if os.path.isdir("proj") else ".", limit=300)
+        for line in out.splitlines():
+            t = line.strip(" |+\\-")
+            if KEEP.search(t) and (label + ": " + t) not in seen:
+                seen.append(label + ": " + t)
+    for t in seen[:60]:
+        fact("diag " + t)
+    if not seen:
+        fact("diag: no kotlin or serialization entries could be read from gradle")
+
+
 def cmd_fail():
     step = os.environ.get("AOT_STEP", "")
+    if os.path.isdir("proj"):
+        try:
+            diag()
+        except Exception as e:
+            fact("diag stopped: " + str(e))
+    if os.path.exists(FACTS):
+        upload("build-facts.txt", FACTS)
     if os.path.exists("build.log"):
         upload("build.log", "build.log")
     err = ""
@@ -289,5 +402,9 @@ if __name__ == "__main__":
         cmd_sign()
     elif c == "sign-inline":
         cmd_sign_inline()
+    elif c == "env-facts":
+        cmd_env_facts()
+    elif c == "compile":
+        sys.exit(cmd_compile())
     elif c == "fail":
         cmd_fail()
