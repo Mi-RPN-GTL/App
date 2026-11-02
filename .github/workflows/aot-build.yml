@@ -21,7 +21,7 @@ on:
 permissions:
   contents: write
 env:
-  AOT_CLOUD_VERSION: "1"
+  AOT_CLOUD_VERSION: "4"
   GH_TOKEN: ${{ github.token }}
   REL: ${{ inputs.release_id }}
   PUB_TAG: ${{ inputs.pub_tag }}
@@ -55,13 +55,15 @@ jobs:
           python3 -m pip install --quiet cryptography
           python3 .github/aot/aot_cloud.py fetch
           if [ "$SEALED" = "true" ]; then python3 .github/aot/aot_cloud.py seal seal-assets.enc apply; fi
-          python3 .github/aot/aot_gradle_gen.py proj
+          python3 .github/aot/aot_gradle_gen.py proj build-facts.txt
+      - name: Prepare facts
+        run: python3 .github/aot/aot_cloud.py env-facts
       - name: Resources
         working-directory: proj
         run: gradle processDebugResources processReleaseResources --console=plain > "$GITHUB_WORKSPACE/build.log" 2>&1
       - name: Compile
         working-directory: proj
-        run: gradle compileDebugKotlin compileDebugJavaWithJavac compileReleaseKotlin compileReleaseJavaWithJavac --console=plain >> "$GITHUB_WORKSPACE/build.log" 2>&1
+        run: python3 "$GITHUB_WORKSPACE/.github/aot/aot_cloud.py" compile
       - name: Dex
         working-directory: proj
         run: gradle minifyReleaseWithR8 dexBuilderDebug --console=plain >> "$GITHUB_WORKSPACE/build.log" 2>&1
