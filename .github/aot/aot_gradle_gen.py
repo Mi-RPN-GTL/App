@@ -3,7 +3,7 @@ import os
 import re
 import sys
 
-PASS = "210"
+PASS = "211"
 AGP = "8.13.0"
 KOTLIN = "2.0.21"
 COMPOSE_BOM = "2024.11.00"
@@ -85,6 +85,17 @@ def generate(root, facts_path=None):
         if l.startswith("androidx.compose.") and compose and l.count(":") < 2:
             continue
         deps.append('    implementation("%s")' % esc(l))
+    for a in spec.get("aars", []):
+        if isinstance(a, str) and re.fullmatch(r"libs/[0-9a-f]{64}\.aar", a):
+            deps.append('    implementation(files("%s"))' % a)
+    extra_repos = ""
+    for r in spec.get("repos", []):
+        if not isinstance(r, dict):
+            continue
+        u = r.get("url")
+        gs = [g for g in r.get("groups", []) if isinstance(g, str) and re.fullmatch(r"[A-Za-z0-9_.\-]+", g)]
+        if isinstance(u, str) and re.fullmatch(r"https://[A-Za-z0-9._~:/?#@!$&*+,;=%-]+", u) and gs:
+            extra_repos += '        maven {\n            url = uri("%s")\n            content {\n%s            }\n        }\n' % (u, "".join('                includeGroup("%s")\n' % g for g in gs))
     plugin_lines = '    id("com.android.application") version "%s"\n    id("org.jetbrains.kotlin.android") version "%s"\n' % (AGP, KOTLIN)
     if compose:
         plugin_lines += '    id("org.jetbrains.kotlin.plugin.compose") version "%s"\n' % KOTLIN
@@ -153,7 +164,7 @@ dependencies {
     with open(os.path.join(root, "build.gradle.kts"), "w") as f:
         f.write(plugins + body)
     with open(os.path.join(root, "settings.gradle.kts"), "w") as f:
-        f.write('pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}\nrootProject.name = "app"\n')
+        f.write('pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n' + extra_repos + '    }\n}\nrootProject.name = "app"\n')
     with open(os.path.join(root, "gradle.properties"), "w") as f:
         f.write("org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8\nkotlin.daemon.jvmargs=-Xmx3g\nandroid.useAndroidX=true\nandroid.nonTransitiveRClass=false\nandroid.suppressUnsupportedCompileSdk=36\n")
     with open(os.path.join(root, "aot-rules.pro"), "w") as f:
