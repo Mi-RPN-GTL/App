@@ -18,10 +18,14 @@ on:
         description: wait for sealed assets
         required: false
         default: "false"
+      runner:
+        description: runner label
+        required: false
+        default: "ubuntu-24.04"
 permissions:
   contents: write
 env:
-  AOT_CLOUD_VERSION: "4"
+  AOT_CLOUD_VERSION: "5"
   GH_TOKEN: ${{ github.token }}
   REL: ${{ inputs.release_id }}
   PUB_TAG: ${{ inputs.pub_tag }}
@@ -30,7 +34,7 @@ env:
 jobs:
   build:
     if: ${{ inputs.job == 'build' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 60
     steps:
       - name: Prepare checkout
@@ -79,7 +83,7 @@ jobs:
         run: python3 .github/aot/aot_cloud.py fail
   sign:
     if: ${{ inputs.job == 'sign' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - name: Prepare checkout
