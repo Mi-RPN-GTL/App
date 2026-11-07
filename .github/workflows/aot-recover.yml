@@ -1,0 +1,48 @@
+name: AOT recover
+run-name: aot recover ${{ inputs.release_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: draft release id
+        required: true
+      runner:
+        description: runner label
+        required: false
+        default: "ubuntu-24.04"
+permissions:
+  contents: write
+defaults:
+  run:
+    shell: bash
+env:
+  AOT_RECOVER_VERSION: "1"
+  GH_TOKEN: ${{ github.token }}
+  REL: ${{ inputs.release_id }}
+  JADX_VERSION: "1.5.2"
+  JADX_SHA256: ""
+jobs:
+  recover:
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    steps:
+      - name: Prepare checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - name: Prepare java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Prepare jadx
+        run: python3 .github/aot/aot_recover.py tool
+      - name: Fetch
+        run: python3 .github/aot/aot_recover.py fetch
+      - name: Decompile
+        run: python3 .github/aot/aot_recover.py decompile
+      - name: Pack
+        run: python3 .github/aot/aot_recover.py pack
+      - name: Report failure
+        if: ${{ failure() }}
+        run: python3 .github/aot/aot_recover.py fail
