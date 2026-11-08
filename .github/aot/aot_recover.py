@@ -22,6 +22,12 @@ JADX_SHA256 = os.environ.get("JADX_SHA256", "").strip().lower()
 MAX_OUT = 90 * 1024 * 1024
 BAD = ("Method dump skipped", "JADX WARN: Code restructure failed", "Can't load method", "Code decompiled incorrectly", "JADX WARN: Failed to decompile")
 RENAMED = re.compile(r"renamed from: ([\w.$]+)")
+OBF = re.compile(r"^(C\d+[a-z]*|zz[a-z]+|[a-z]{1,3})$")
+IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,59}$")
+H_SERIAL = re.compile(r'SerialDescriptor\(\s*"([\w.$]{3,120})"')
+H_TOSTR = re.compile(r'"([A-Z][A-Za-z0-9_]{2,40})[({][a-z][A-Za-z0-9_]*="')
+H_SOURCE = re.compile(r"compiled from: ([A-Za-z_][A-Za-z0-9_$]*)\.(?:kt|java)")
+H_TAG = re.compile(r'\bTAG\s*=\s*"([A-Za-z_][A-Za-z0-9_]{2,40})"')
 
 
 def call(method, url, data=None, ctype="application/json"):
@@ -141,12 +147,45 @@ def top(name):
     return name.split("$")[0]
 
 
+def looks_obf(simple):
+    return len(simple) <= 2 or bool(OBF.match(simple))
+
+
+def name_hints(text, simple):
+    if not looks_obf(simple):
+        return None
+    found = []
+    m = H_SERIAL.search(text)
+    if m:
+        found.append((m.group(1).replace("$", ".").split(".")[-1], "serializer"))
+    m = H_TOSTR.search(text)
+    if m:
+        found.append((m.group(1), "toString"))
+    m = H_SOURCE.search(text)
+    if m:
+        found.append((m.group(1).split("$")[0], "SourceFile"))
+    m = H_TAG.search(text)
+    if m:
+        found.append((m.group(1), "TAG"))
+    for name, src in found:
+        if IDENT.match(name) and name != simple and name != "SourceFile":
+            return name, src
+    return None
+
+
 def cmd_decompile():
     dex = sorted(os.path.join("in", n) for n in os.listdir("in") if n.endswith(".dex"))
     shutil.rmtree("out", ignore_errors=True)
     env = dict(os.environ)
     env["JAVA_OPTS"] = "-Xmx6g"
     cmd = [os.path.join("jadx", "bin", "jadx"), "--deobf", "--show-bad-code", "--no-res", "-j", "2", "-d", "out"] + dex
+    try:
+        helptext = subprocess.run([cmd[0], "--help"], capture_output=True, text=True, timeout=120).stdout
+        for line in helptext.splitlines():
+            if "sourcename" in line.lower():
+                print("jadx option: " + line.strip())
+    except Exception:
+        pass
     with open("jadx.log", "wb") as log:
         code = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=env).returncode
     print("jadx exit " + str(code))
@@ -162,6 +201,7 @@ def cmd_pack():
     spent = 0
     truncated = 0
     kept = 0
+    hints = {}
     with zipfile.ZipFile("result.zip", "w", zipfile.ZIP_DEFLATED) as z:
         for d, _, files in os.walk(root):
             for f in files:
@@ -176,6 +216,11 @@ def cmd_pack():
                 hit = ({top(name)} | origs) & want
                 if not hit:
                     continue
+                orig = sorted(origs)[0] if origs else top(name)
+                if orig not in hints:
+                    h = name_hints(text, orig.split(".")[-1])
+                    if h:
+                        hints[orig] = h
                 if spent + len(text) > MAX_OUT:
                     truncated += 1
                     continue
@@ -185,11 +230,14 @@ def cmd_pack():
                 found |= hit
                 if any(m in text for m in BAD):
                     bad |= hit
+        rows = ["original\tsuggested\tsource"] + [k + "\t" + v[0] + "\t" + v[1] for k, v in sorted(hints.items())]
+        z.writestr("names.tsv", "\n".join(rows) + "\n")
         report = {
             "tool": "jadx " + JADX_VERSION,
             "files": kept,
             "bytes": spent,
             "truncated": truncated,
+            "names": len(hints),
             "missing": sorted(want - found),
             "bad": sorted(bad),
         }
